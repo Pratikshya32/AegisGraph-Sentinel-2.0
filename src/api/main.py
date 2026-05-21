@@ -9,6 +9,8 @@ Real-time fraud detection API service
 # (data/synthetic/graph.gpickle). This file is created during data generation
 # and is treated as a trusted build artifact.
 # We will add SHA256 verification before loading to prevent tampering.
+import logging
+logger = logging.getLogger(__name__)
 import hashlib
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -213,7 +215,8 @@ except (ImportError, SyntaxError) as e:
                         if chain_length >= 3:
                             graph_risk += 0.2
                             print(f"⚠️ Chain pattern: {source_account} is part of a {chain_length}-hop chain")
-                except:
+                except Exception as e:
+                    logger.error(f"Error: {e}")
                     pass
         
         graph_risk = min(graph_risk, 1.0)

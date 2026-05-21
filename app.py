@@ -4,6 +4,8 @@ Real-time Fraud Detection Interface
 """
 # Updated: May 17, 2026
 
+import logging
+logger = logging.getLogger(__name__)
 import streamlit as st
 import requests
 import json
@@ -190,7 +192,8 @@ with st.sidebar:
             st.info(mode)
         else:
             st.error("⚠️ API Issue")
-    except:
+    except Exception as e:
+        logger.error(f"Error: {e}")
         st.error("❌ API Offline")
         st.warning("Start API: `python -m uvicorn src.api.main:app --reload`")
 
