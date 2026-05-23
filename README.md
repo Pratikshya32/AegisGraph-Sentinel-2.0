@@ -71,11 +71,11 @@ Behavioral Analyzer ────────────────────
 cd "AegisGraph Sentinel 2.0"
 
 # Install dependencies
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 
-# Configure settings
-cp config/config.yaml.example config/config.yaml
-# Edit config.yaml with your settings
+# Optional: review default settings
+# config/config.yaml is included with the repository
 ```
 
 ### Environment Configuration
@@ -122,7 +122,7 @@ CUDA_VISIBLE_DEVICES=0
 - `MODEL_PATH`: Path to the model checkpoint (default: models/htgnn_best.pt)
 - `CUDA_VISIBLE_DEVICES`: GPU device IDs (default: 0)
 
-The application will validate that all required environment variables are set on startup and raise a clear error if any are missing.
+In production (`AEGIS_ENV=production`), the application validates that all required environment variables are set on startup and raises a clear error if any are missing. Development and test runs log a warning instead.
 
 ### Running the API Server
 

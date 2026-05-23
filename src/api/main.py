@@ -31,7 +31,7 @@ from typing import Dict, List
 import uvicorn
 import random
 import json
-# Removed pickle import for security reasons
+import pickle
 import networkx as nx
 import numpy as np
 
@@ -491,7 +491,7 @@ class AppState:
         self.fraud_chains = []
         self.mule_accounts = {'mule_acc_001', 'mule_acc_002', 'test_merchant', 'suspect_account_1', 'fraud_wallet_xyz'}
         self.account_profiles = {}
-        self.graph_loaded = True  # Enable for demo
+        self.graph_loaded = False
         # Lateral movement detection - rolling betweenness centrality baseline
         self.centrality_baseline = {}  # {account_id: [centrality_history]}
         self.centrality_window_size = 10  # Track last 10 measurements
@@ -547,32 +547,42 @@ async def lifespan(app: FastAPI):
         # Load synthetic fraud data for graph-based detection
     try:
         # === SECURE GRAPH LOADING ===
-        # We verify the SHA256 hash of the pickle file before loading it.
-        # This mitigates supply-chain / tampering attacks on the .gpickle artifact.
-        graph_path = Path("data/synthetic/graph.graphml")
+        # Prefer GraphML, but keep compatibility with the legacy trusted gpickle artifact.
+        graph_candidates = [
+            Path(os.getenv("AEGIS_GRAPH_PATH")) if os.getenv("AEGIS_GRAPH_PATH") else None,
+            Path("data/synthetic/graph.graphml"),
+            Path("data/synthetic/graph.gpickle"),
+        ]
+        graph_path = next((path for path in graph_candidates if path and path.exists()), None)
         
         # TODO: Replace this with the actual SHA256 of your generated graph.graphml
         EXPECTED_GRAPH_SHA256 = None   # Example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         
-        if graph_path.exists():
+        if graph_path:
             with open(graph_path, "rb") as f:
                 file_bytes = f.read()
                 actual_hash = hashlib.sha256(file_bytes).hexdigest()
             
             if EXPECTED_GRAPH_SHA256 and actual_hash != EXPECTED_GRAPH_SHA256:
                 raise RuntimeError(
-                    f"SECURITY ALERT: graph.graphml integrity check FAILED!\n"
+                    f"SECURITY ALERT: {graph_path} integrity check FAILED!\n"
                     f"Expected SHA256: {EXPECTED_GRAPH_SHA256}\n"
                     f"Actual SHA256:   {actual_hash}\n"
                     "Possible file tampering or corrupted artifact. Aborting startup."
                 )
             
-            import networkx as nx
-            state.transaction_graph = nx.read_graphml(graph_path)
+            if graph_path.suffix.lower() == ".graphml":
+                state.transaction_graph = nx.read_graphml(graph_path)
+            elif graph_path.suffix.lower() == ".gpickle":
+                with open(graph_path, "rb") as f:
+                    state.transaction_graph = pickle.load(f)
+            else:
+                raise ValueError(f"Unsupported graph artifact format: {graph_path.suffix}")
             _startup_logger.info(
                 "Loaded transaction graph",
                 event_type="graph_loaded",
                 metadata={
+                    "path": str(graph_path),
                     "nodes": state.transaction_graph.number_of_nodes(),
                     "edges": state.transaction_graph.number_of_edges(),
                 },
@@ -587,6 +597,9 @@ async def lifespan(app: FastAPI):
             )
             print("⚠ Graph file not found at data/synthetic/graph.graphml")
         
+        if not graph_path:
+            state.graph_loaded = False
+
         # Load fraud chains
         chains_path = Path("data/synthetic/fraud_chains.json")
         if chains_path.exists():
