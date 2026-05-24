@@ -21,7 +21,6 @@ from slowapi.middleware import SlowAPIMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import time
-import asyncio
 import os
 from datetime import datetime, timezone
 from datetime import timezone
@@ -36,6 +35,7 @@ import networkx as nx
 import numpy as np
 
 from ..config.validation import validate_environment
+from ..runtime import LifecycleManager, RuntimeState, honeypot_auto_release_loop
 from .schemas import (
     TransactionCheckRequest,
     TransactionCheckResponse,
@@ -482,6 +482,7 @@ except (ImportError, SyntaxError) as e:
 class AppState:
     """Application state"""
     def __init__(self):
+        self.lateral_movement_detector = None
         self.start_time = time.time()
         self.requests_processed = 0
         self.decisions = {"ALLOW": 0, "REVIEW": 0, "BLOCK": 0}
@@ -504,52 +505,45 @@ class AppState:
         self.honeypot_manager = None
         self.blockchain_manager = None
         self.aegis_oracle = None  # Explainability engine
-        self.lateral_movement_detector = None
+        self.runtime = RuntimeState()
+        self.runtime.bind_legacy_state(self)
+        self.services = self.runtime.services
+        self.tasks = self.runtime.tasks
         
 state = AppState()
 
 
 async def _honeypot_auto_release_loop(interval_seconds: int = 60):
-    while True:
-        await asyncio.sleep(interval_seconds)
-        if state.honeypot_manager is not None:
-            try:
-                state.honeypot_manager.check_auto_release()
-            except Exception as exc:
-                _api_logger.warning(
-                    f"Honeypot auto-release check failed: {exc}",
-                    event_type="honeypot_auto_release_error",
-                )
+    await honeypot_auto_release_loop(
+        lambda: state.honeypot_manager,
+        interval_seconds=interval_seconds,
+        logger=_api_logger,
+    )
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    _startup_logger = get_logger("api.startup")
-    """
-    Application lifespan. Initialises services and config on startup,
-    tracks background tasks, and cancels them cleanly on shutdown.
-    """
-    _startup_logger = get_logger("api.startup")
-    # Startup
+def _startup_banner():
     print("=" * 80)
     print("AegisGraph Sentinel 2.0 - Starting up...")
     print("=" * 80)
 
-    # Validate environment variables
+
+def _validate_runtime_environment():
     validate_environment()
 
-    # Load configuration
+
+def _load_runtime_configuration(startup_logger):
     config_path = Path("config/config.yaml")
     if config_path.exists():
         with open(config_path, 'r') as f:
             state.config = yaml.safe_load(f)
-        _startup_logger.info("Configuration loaded", event_type="config_loaded")
+        startup_logger.info("Configuration loaded", event_type="config_loaded")
     else:
-        _startup_logger.warning("Configuration file not found, using defaults", event_type="config_missing")
+        startup_logger.warning("Configuration file not found, using defaults", event_type="config_missing")
         state.config = {}
+    state.services.register_service("config", state.config, replace=True)
     
-    # Load synthetic fraud data for graph-based detection
-        # Load synthetic fraud data for graph-based detection
+
+def _load_graph_runtime_data(startup_logger):
     try:
         # === SECURE GRAPH LOADING ===
         # Prefer GraphML, but keep compatibility with the legacy trusted gpickle artifact.
@@ -596,7 +590,7 @@ async def lifespan(app: FastAPI):
                   f"{state.transaction_graph.number_of_edges()} edges")
             state.graph_loaded = True
         else:
-            _startup_logger.warning(
+            startup_logger.warning(
                 "Graph file not found at data/synthetic/graph.gpickle",
                 event_type="graph_missing",
             )
@@ -612,7 +606,7 @@ async def lifespan(app: FastAPI):
                 state.fraud_chains = json.load(f)
             for chain in state.fraud_chains:
                 state.mule_accounts.update(chain.get('accounts', []))
-            _startup_logger.info(
+            startup_logger.info(
                 "Loaded fraud chains",
                 event_type="fraud_chains_loaded",
                 metadata={
@@ -621,7 +615,7 @@ async def lifespan(app: FastAPI):
                 },
             )
         else:
-            _startup_logger.warning("Fraud chains file not found", event_type="fraud_chains_missing")
+            startup_logger.warning("Fraud chains file not found", event_type="fraud_chains_missing")
         
         # Load account profiles
         accounts_path = Path("data/synthetic/accounts.json")
@@ -629,75 +623,86 @@ async def lifespan(app: FastAPI):
             with open(accounts_path, 'r') as f:
                 accounts_list = json.load(f)
                 state.account_profiles = {acc['account_id']: acc for acc in accounts_list}
-            _startup_logger.info(
+            startup_logger.info(
                 "Loaded account profiles",
                 event_type="accounts_loaded",
                 metadata={"count": len(state.account_profiles)},
             )
         else:
-            _startup_logger.warning("Accounts file not found", event_type="accounts_missing")
+            startup_logger.warning("Accounts file not found", event_type="accounts_missing")
 
     except Exception as e:
-        _startup_logger.warning(
+        startup_logger.warning(
             f"Error loading graph data: {e}",
             event_type="graph_load_error",
         )
         state.graph_loaded = False
+    state.services.register_service("transaction_graph", state.transaction_graph, replace=True)
+    state.services.register_service("fraud_chains", state.fraud_chains, replace=True)
+    state.services.register_service("account_profiles", state.account_profiles, replace=True)
 
-    # Check model availability
+
+def _initialize_model_runtime(startup_logger):
     if MODEL_AVAILABLE:
         state.model_loaded = True
-        _startup_logger.info("Model components loaded successfully", event_type="model_ready")
+        startup_logger.info("Model components loaded successfully", event_type="model_ready")
     else:
         state.model_loaded = False
-        _startup_logger.warning(
+        startup_logger.warning(
             "Running in DEMO MODE (install torch-geometric for full functionality)",
             event_type="demo_mode",
         )
+    state.services.register_service("model_available", MODEL_AVAILABLE, replace=True)
     
-    # Initialize innovation managers
+
+def _initialize_innovation_runtime(startup_logger):
     if INNOVATIONS_AVAILABLE:
         try:
             state.voice_analyzer = VoiceStressAnalyzer()
-            _startup_logger.info("Voice Stress Analyzer initialized", event_type="innovation_ready")
+            state.services.register_service("voice_analyzer", state.voice_analyzer, replace=True)
+            startup_logger.info("Voice Stress Analyzer initialized", event_type="innovation_ready")
         except Exception as e:
-            _startup_logger.warning(
+            startup_logger.warning(
                 f"Voice analyzer initialization failed: {e}",
                 event_type="innovation_init_failed",
             )
 
         try:
             state.mule_scorer = PredictiveMuleScorer()
-            _startup_logger.info("Predictive Mule Scorer initialized", event_type="innovation_ready")
+            state.services.register_service("mule_scorer", state.mule_scorer, replace=True)
+            startup_logger.info("Predictive Mule Scorer initialized", event_type="innovation_ready")
         except Exception as e:
-            _startup_logger.warning(
+            startup_logger.warning(
                 f"Mule scorer initialization failed: {e}",
                 event_type="innovation_init_failed",
             )
 
         try:
             state.honeypot_manager = HoneypotEscrowManager()
-            _startup_logger.info("Honeypot Escrow Manager initialized", event_type="innovation_ready")
+            state.services.register_service("honeypot_manager", state.honeypot_manager, replace=True)
+            startup_logger.info("Honeypot Escrow Manager initialized", event_type="innovation_ready")
         except Exception as e:
-            _startup_logger.warning(
+            startup_logger.warning(
                 f"Honeypot manager initialization failed: {e}",
                 event_type="innovation_init_failed",
             )
 
         try:
             state.blockchain_manager = BlockchainEvidenceManager()
-            _startup_logger.info("Blockchain Evidence Manager initialized", event_type="innovation_ready")
+            state.services.register_service("blockchain_manager", state.blockchain_manager, replace=True)
+            startup_logger.info("Blockchain Evidence Manager initialized", event_type="innovation_ready")
         except Exception as e:
-            _startup_logger.warning(
+            startup_logger.warning(
                 f"Blockchain manager initialization failed: {e}",
                 event_type="innovation_init_failed",
             )
 
         try:
             state.aegis_oracle = AegisOracleExplainer()
-            _startup_logger.info("Aegis-Oracle Explainer initialized", event_type="innovation_ready")
+            state.services.register_service("aegis_oracle", state.aegis_oracle, replace=True)
+            startup_logger.info("Aegis-Oracle Explainer initialized", event_type="innovation_ready")
         except Exception as e:
-            _startup_logger.warning(
+            startup_logger.warning(
                 f"Aegis-Oracle initialization failed: {e}",
                 event_type="innovation_init_failed",
             )
@@ -711,15 +716,18 @@ async def lifespan(app: FastAPI):
                 event_type="innovation_init_failed",
             )
     else:
-        _startup_logger.warning("Innovation modules not available", event_type="innovations_unavailable")
+        startup_logger.warning("Innovation modules not available", event_type="innovations_unavailable")
 
-    _startup_logger.info(
+
+def _startup_ready(startup_logger):
+    startup_logger.info(
         "AegisGraph Sentinel 2.0 is ready",
         event_type="startup_complete",
         metadata={
             "mode": "PRODUCTION" if MODEL_AVAILABLE else "DEMO",
             "graph_detection": state.graph_loaded,
             "innovations": INNOVATIONS_AVAILABLE,
+            "runtime": state.runtime.get_metrics(),
         },
     )
     
@@ -730,20 +738,66 @@ async def lifespan(app: FastAPI):
     print(f"Innovations: {'ENABLED' if INNOVATIONS_AVAILABLE else 'DISABLED'}")
     print("API Documentation: http://localhost:8000/docs")
     print("=" * 80)
-    
-    # Start background tasks. Save the handle so we can stop it cleanly on shutdown.
-    honeypot_task = asyncio.create_task(_honeypot_auto_release_loop())
-    
-    yield
-    
-    # Shutdown 
+
+
+def _start_runtime_background_tasks():
+    state.tasks.register_task(
+        _honeypot_auto_release_loop(),
+        name="honeypot_auto_release",
+        owner="innovation.honeypot",
+    )
+
+
+async def _stop_runtime_background_tasks():
     print("Shutting down AegisGraph Sentinel 2.0...")
-    honeypot_task.cancel()
-    try:
-        await honeypot_task
-    except asyncio.CancelledError:
-        pass
+    await state.tasks.cancel_all_tasks(timeout_seconds=10.0)
     print("Background tasks stopped cleanly")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan. Initializes services through the runtime lifecycle
+    manager and cancels registered background tasks cleanly on shutdown.
+    """
+    startup_logger = get_logger("api.startup")
+    lifecycle_manager = LifecycleManager(state.runtime, logger=startup_logger)
+    state.services.register_service("lifecycle_manager", lifecycle_manager, replace=True)
+    app.state.runtime = state.runtime
+
+    lifecycle_manager.register_startup("startup_banner", _startup_banner, critical=False)
+    lifecycle_manager.register_startup("validate_environment", _validate_runtime_environment)
+    lifecycle_manager.register_startup(
+        "load_configuration",
+        lambda: _load_runtime_configuration(startup_logger),
+    )
+    lifecycle_manager.register_startup(
+        "load_graph_runtime_data",
+        lambda: _load_graph_runtime_data(startup_logger),
+        critical=False,
+    )
+    lifecycle_manager.register_startup(
+        "initialize_model_runtime",
+        lambda: _initialize_model_runtime(startup_logger),
+    )
+    lifecycle_manager.register_startup(
+        "initialize_innovation_runtime",
+        lambda: _initialize_innovation_runtime(startup_logger),
+        critical=False,
+    )
+    lifecycle_manager.register_startup("startup_ready", lambda: _startup_ready(startup_logger))
+    lifecycle_manager.register_startup(
+        "start_background_tasks",
+        _start_runtime_background_tasks,
+        critical=False,
+    )
+    lifecycle_manager.register_shutdown("stop_background_tasks", _stop_runtime_background_tasks)
+
+    await lifecycle_manager.startup()
+    try:
+        yield
+    finally:
+        await lifecycle_manager.shutdown()
 
 # Initialize FastAPI app
 app = FastAPI(
