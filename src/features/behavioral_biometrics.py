@@ -388,17 +388,23 @@ def analyze_keystroke_data(
     Returns:
         Dictionary with features and stress indicators
     """
-    # Create keystroke events
+    # Validate inputs to prevent min()/max() crashes on empty or mismatched arrays
+    if not press_times or not release_times or len(press_times) != len(release_times):
+        analyzer = KeystrokeDynamicsAnalyzer()
+        features = analyzer._empty_features()
+        return {**features, **analyzer.detect_stress(features)}
+
+    # Handle optional parameters gracefully
     if key_ids is None:
         key_ids = [f"key_{i}" for i in range(len(press_times))]
     if is_backspace is None:
         is_backspace = [False] * len(press_times)
-    
+
     events = [
         KeystrokeEvent(kid, pt, rt, bs)
         for kid, pt, rt, bs in zip(key_ids, press_times, release_times, is_backspace)
     ]
-    
+
     sequence = KeystrokeSequence(
         events=events,
         session_start=min(press_times),
