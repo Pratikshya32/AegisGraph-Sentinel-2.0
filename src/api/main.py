@@ -20,8 +20,10 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+import asyncio
 import time
 import os
+from functools import partial
 from datetime import datetime, timezone
 from datetime import timezone
 from pathlib import Path
@@ -753,6 +755,100 @@ async def _stop_runtime_background_tasks():
     print("Background tasks stopped cleanly")
 
 
+def _run_scoring_pipeline(
+    transaction: dict,
+    biometrics: dict | None,
+    source_account: str,
+    target_account: str,
+    lateral_detector,
+    innovations_available: bool,
+) -> dict:
+    """
+    Pure synchronous scoring work safe to run in a thread pool executor.
+    Returns the final risk_result dict.
+    """
+    risk_result = compute_risk_score(
+        transaction=transaction,
+        biometrics=biometrics,
+    )
+
+    if innovations_available and lateral_detector is not None:
+        try:
+            lateral_detector.update_graph(source_account, target_account)
+            lm_risk_added, is_pivoting = lateral_detector.analyze_account(source_account)
+
+            if is_pivoting:
+                current_score = risk_result.get("risk_score", 0.0)
+                new_score = min(1.0, current_score + lm_risk_added)
+                risk_result["risk_score"] = new_score
+                risk_result["breakdown"]["lateral_movement"] = lm_risk_added
+                risk_result["lateral_movement_detected"] = True
+                risk_result["lateral_movement_reason"] = (
+                    "MITRE TA0008: Rapid centrality spike indicating network pivoting."
+                )
+                if new_score >= 0.7:
+                    risk_result["decision"] = "BLOCK"
+                elif new_score >= 0.4 and risk_result["decision"] == "ALLOW":
+                    risk_result["decision"] = "REVIEW"
+        except Exception as e:
+            _api_logger.warning(
+                f"Lateral movement check failed: {e}",
+                event_type="lateral_movement_error",
+            )
+
+    return risk_result
+
+
+def _activate_honeypot_sync(
+    honeypot_manager,
+    transaction_id: str,
+    source_account: str,
+    target_account: str,
+    amount: float,
+    currency: str,
+    risk_score: float,
+    fraud_indicators: list,
+):
+    """Synchronous honeypot activation safe to run in executor."""
+    return honeypot_manager.activate_honeypot(
+        transaction_id=transaction_id,
+        source_account=source_account,
+        target_account=target_account,
+        amount=amount,
+        currency=currency,
+        risk_score=risk_score,
+        fraud_indicators=fraud_indicators,
+    )
+
+
+def _seal_blockchain_sync(
+    blockchain_manager,
+    transaction_id: str,
+    source_account: str,
+    target_account: str,
+    amount: float,
+    risk_score: float,
+    decision: str,
+    confidence: float,
+    breakdown: dict,
+    explanation: str,
+    fraud_patterns: list,
+):
+    """Synchronous blockchain sealing safe to run in executor."""
+    return blockchain_manager.seal_evidence(
+        transaction_id=transaction_id,
+        source_account=source_account,
+        target_account=target_account,
+        amount=amount,
+        risk_score=risk_score,
+        decision=decision,
+        confidence=confidence,
+        breakdown=breakdown,
+        explanation=explanation,
+        fraud_patterns=fraud_patterns,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -983,44 +1079,20 @@ async def check_transaction(request: TransactionCheckRequest):
                         event_type="keystroke_analysis_error",
                     )
         
-        # Compute risk score
-        risk_result = compute_risk_score(
-            transaction=transaction,
-            biometrics=biometrics,
+        # Offload CPU-bound scoring + graph analysis to thread pool
+        loop = asyncio.get_running_loop()
+        risk_result = await loop.run_in_executor(
+            None,
+            partial(
+                _run_scoring_pipeline,
+                transaction,
+                biometrics,
+                request.source_account,
+                request.target_account,
+                state.lateral_movement_detector if INNOVATIONS_AVAILABLE else None,
+                INNOVATIONS_AVAILABLE,
+            ),
         )
-        
-        # --- NEW: LATERAL MOVEMENT INTEGRATION ---
-        if INNOVATIONS_AVAILABLE and state.lateral_movement_detector:
-            try:
-                # 1. Update the live temporal graph
-                state.lateral_movement_detector.update_graph(
-                    request.source_account,
-                    request.target_account
-                )
-                
-                # 2. Analyze the source account for centrality spikes
-                lm_risk_added, is_pivoting = state.lateral_movement_detector.analyze_account(
-                    request.source_account
-                )
-
-                # 3. Apply penalty if attacker is pivoting
-                if is_pivoting:
-                    current_score = risk_result.get('risk_score', 0.0)
-                    new_score = min(1.0, current_score + lm_risk_added)
-                    
-                    risk_result['risk_score'] = new_score
-                    risk_result['breakdown']['lateral_movement'] = lm_risk_added
-                    risk_result['lateral_movement_detected'] = True
-                    risk_result['lateral_movement_reason'] = "MITRE TA0008: Rapid centrality spike indicating network pivoting."
-                    
-                    # Escalate decision if thresholds are crossed
-                    if new_score >= 0.7:
-                        risk_result['decision'] = 'BLOCK'
-                    elif new_score >= 0.4 and risk_result['decision'] == 'ALLOW':
-                        risk_result['decision'] = 'REVIEW'
-            except Exception as e:
-                _api_logger.warning(f"Lateral movement check failed: {e}", event_type="lateral_movement_error")
-        # -----------------------------------------
 
         # Generate explanation
         explanation_result = generate_explanation(
@@ -1053,14 +1125,19 @@ async def check_transaction(request: TransactionCheckRequest):
                 logic_decision = 'ALLOW' if risk_result['decision'] == 'APPROVE' else risk_result['decision']
                 if should_activate and logic_decision == 'BLOCK':
                     # Activate honeypot
-                    honeypot = state.honeypot_manager.activate_honeypot(
-                        transaction_id=request.transaction_id,
-                        source_account=request.source_account,
-                        target_account=request.target_account,
-                        amount=request.amount,
-                        currency=request.currency,
-                        risk_score=risk_result['risk_score'],
-                        fraud_indicators=fraud_indicators,
+                    honeypot = await loop.run_in_executor(
+                        None,
+                        partial(
+                            _activate_honeypot_sync,
+                            state.honeypot_manager,
+                            request.transaction_id,
+                            request.source_account,
+                            request.target_account,
+                            request.amount,
+                            request.currency,
+                            risk_result['risk_score'],
+                            fraud_indicators,
+                        ),
                     )
                     honeypot_activated = True
                     honeypot_id = honeypot.honeypot_id
@@ -1102,17 +1179,22 @@ async def check_transaction(request: TransactionCheckRequest):
                     if 'circular' in explanation_result['explanation'].lower():
                         fraud_patterns.append('circular_flow')
                     
-                    evidence = state.blockchain_manager.seal_evidence(
-                        transaction_id=request.transaction_id,
-                        source_account=request.source_account,
-                        target_account=request.target_account,
-                        amount=request.amount,
-                        risk_score=risk_result['risk_score'],
-                        decision=risk_result['decision'],
-                        confidence=risk_result['confidence'],
-                        breakdown=risk_result['breakdown'],
-                        explanation=explanation_result['explanation'],
-                        fraud_patterns=fraud_patterns,
+                    evidence = await loop.run_in_executor(
+                        None,
+                        partial(
+                            _seal_blockchain_sync,
+                            state.blockchain_manager,
+                            request.transaction_id,
+                            request.source_account,
+                            request.target_account,
+                            request.amount,
+                            risk_result['risk_score'],
+                            risk_result['decision'],
+                            risk_result['confidence'],
+                            risk_result['breakdown'],
+                            explanation_result['explanation'],
+                            fraud_patterns,
+                        ),
                     )
                     blockchain_evidence_id = evidence.evidence_id
                     _audit_logger.log_security_action(
