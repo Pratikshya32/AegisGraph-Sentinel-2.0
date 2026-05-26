@@ -31,7 +31,7 @@ st.set_page_config(
 )
 
 # API Configuration
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 
 
 def _accessible_status(emoji: str, label: str) -> str:
@@ -62,21 +62,21 @@ st.markdown("""
     }
     
     /* Sleek Glassmorphism Metric Cards */
-    .metric-card {
+    [data-testid="stMetric"], .metric-card {
         background: rgba(22, 27, 48, 0.45) !important;
         border: 1px solid rgba(255, 255, 255, 0.08) !important;
         border-radius: 16px !important;
-        padding: 24px !important;
-        box-shadow: 0 10px 35px 0 rgba(0, 0, 0, 0.45) !important;
+        padding: 16px 20px !important;
+        box-shadow: 0 10px 30px 0 rgba(0, 0, 0, 0.3) !important;
         backdrop-filter: blur(12px) !important;
         -webkit-backdrop-filter: blur(12px) !important;
         transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1) !important;
     }
     
-    .metric-card:hover {
-        transform: translateY(-6px);
-        border-color: rgba(045, 212, 191, 0.45) !important;
-        box-shadow: 0 15px 45px 0 rgba(056, 189,248, 0.25) !important;
+    [data-testid="stMetric"]:hover, .metric-card:hover {
+        transform: translateY(-4px);
+        border-color: rgba(45, 212, 191, 0.45) !important;
+        box-shadow: 0 15px 40px 0 rgba(56, 189, 248, 0.2) !important;
         background: rgba(22, 27, 48, 0.65) !important;
     }
     
@@ -296,10 +296,10 @@ if page == "🧭 Command Center":
             
             def highlight_decision(val):
                 if val == 'BLOCK':
-                    return 'background-color: rgba(255, 107, 107, 0.2); color: #ff6b6b; font-weight: bold;'
+                    return 'background-color: rgba(239, 68, 68, 0.2); color: #ef4444; font-weight: bold;'
                 elif val == 'REVIEW':
-                    return 'background-color: rgba(255, 215, 0, 0.2); color: #ffd700; font-weight: bold;'
-                return 'background-color: rgba(144, 238, 144, 0.2); color: #90ee90;'
+                    return 'background-color: rgba(245, 158, 11, 0.2); color: #f59e0b; font-weight: bold;'
+                return 'background-color: rgba(16, 185, 129, 0.2); color: #10b981;'
             
             # Note: Pandas Styler applymap was deprecated in Pandas 2.1.0, replaced by map
             st.dataframe(
@@ -311,11 +311,11 @@ if page == "🧭 Command Center":
             st.subheader("📈 Realtime Risk Density (Heatmap)")
             if len(st.session_state.live_events) > 2:
                 fig = px.area(df_events[::-1], x='time', y='risk', color='decision',
-                             color_discrete_map={'ALLOW': '#90EE90', 'REVIEW': '#FFD700', 'BLOCK': '#FF6B6B'},
+                             color_discrete_map={'ALLOW': '#10b981', 'REVIEW': '#f59e0b', 'BLOCK': '#ef4444'},
                              title='Live Risk Timeline')
                 fig.update_layout(height=250, margin=dict(l=0, r=0, t=30, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
                 st.plotly_chart(fig, use_container_width=True)
-
+ 
     with col_side:
         st.subheader("🧠 Aegis-Oracle Explainability")
         if st.session_state.live_events:
@@ -330,9 +330,9 @@ if page == "🧭 Command Center":
                     'axis': {'range': [None, 100]},
                     'bar': {'color': "darkblue"},
                     'steps': [
-                        {'range': [0, 40], 'color': '#90EE90'},
-                        {'range': [40, 70], 'color': '#FFD700'},
-                        {'range': [70, 100], 'color': '#FF6B6B'}
+                        {'range': [0, 40], 'color': '#10b981'},
+                        {'range': [40, 70], 'color': '#f59e0b'},
+                        {'range': [70, 100], 'color': '#ef4444'}
                     ]
                 }
             ))
@@ -1844,9 +1844,9 @@ elif page == "⌨️ Behavioral Biometrics":
                 'axis': {'range': [None, 100]},
                 'bar': {'color': "darkblue"},
                 'steps': [
-                    {'range': [0, 40], 'color': '#90EE90'},
-                    {'range': [40, 70], 'color': '#FFD700'},
-                    {'range': [70, 100], 'color': '#FF6B6B'}
+                    {'range': [0, 40], 'color': '#10b981'},
+                    {'range': [40, 70], 'color': '#f59e0b'},
+                    {'range': [70, 100], 'color': '#ef4444'}
                 ]
             }
         ))
