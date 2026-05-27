@@ -116,6 +116,21 @@ def _require_honeypot_admin(x_honeypot_token: str | None) -> None:
     if not hmac.compare_digest(provided_hash, expected_hash):
         raise HTTPException(status_code=403, detail="Unauthorized honeypot request")
 
+
+def _require_legal_export_authorization(authorization_token: str | None) -> None:
+    expected_hash = os.getenv("AEGIS_LEGAL_EXPORT_TOKEN_HASH")
+    if not expected_hash:
+        raise HTTPException(
+            status_code=503,
+            detail="Legal export authorization is not configured",
+        )
+    if not authorization_token:
+        raise HTTPException(status_code=401, detail="Missing legal export authorization token")
+
+    provided_hash = hashlib.sha256(authorization_token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(provided_hash, expected_hash):
+        raise HTTPException(status_code=403, detail="Unauthorized legal export request")
+
 # Try to import model components, record availability but never disable completely
 try:
     from ..inference.risk_scorer import compute_risk_score
@@ -1883,18 +1898,7 @@ async def export_legal_evidence(request: LegalExportRequest):
         raise HTTPException(status_code=503, detail="Blockchain system not available")
     
     try:
-        expected_token_hash = os.getenv("AEGIS_LEGAL_EXPORT_TOKEN_HASH")
-        if not expected_token_hash:
-            raise HTTPException(
-                status_code=503,
-                detail="Legal export authorization is not configured",
-            )
-
-        provided_token_hash = hashlib.sha256(
-            request.authorization_token.encode("utf-8")
-        ).hexdigest()
-        if provided_token_hash != expected_token_hash:
-            raise HTTPException(status_code=403, detail="Unauthorized legal export request")
+        _require_legal_export_authorization(request.authorization_token)
 
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
